@@ -1,0 +1,14 @@
+#define A0 18
+#define A1 17
+#define A2 16
+#define A3 15
+#define A4 14
+#define A5 8
+#define D2 6
+#define D3 9
+#define D4 10
+#define D5 11
+#define RX 2
+#define TX 1
+#define SCL 41
+#define SDA 42

@@ -18,7 +18,6 @@ TaskHandle_t bipTaskHandle;
 volatile bool audioEnCours = false;
 
 // --- CONFIGURATION BLE ---
-// UUIDs générés pour le service et la caractéristique
 #define SERVICE_UUID           "6E400001-B5A3-F393-E0A9-E50E24DCCA9E"
 #define CHARACTERISTIC_UUID    "6E400002-B5A3-F393-E0A9-E50E24DCCA9E"
 
@@ -26,10 +25,8 @@ BLEServer* pServer = NULL;
 BLECharacteristic* pCharacteristic = NULL;
 bool deviceConnected = false;
 
-// Drapeau pour indiquer que l'application a demandé un redémarrage
 volatile bool restartRequested = false;
 
-// Gestion de la connexion/déconnexion BLE
 class MyServerCallbacks: public BLEServerCallbacks {
     void onConnect(BLEServer* pServer) {
       deviceConnected = true;
@@ -43,7 +40,6 @@ class MyServerCallbacks: public BLEServerCallbacks {
     }
 };
 
-
 // ============================================================
 // AUDIO
 // ============================================================
@@ -53,13 +49,17 @@ constexpr uint32_t BIP_FREQ_HZ = 1000;
 constexpr uint32_t BIP_DUREE_MS = 30;
 
 // ============================================================
-// RÉGLAGES DU SNAKE
+// RÉGLAGES DU SNAKE & JOUEURS (Jusqu'à 8 joueurs)
 // ============================================================
-constexpr int NB_JOUEURS = 2;
-constexpr int JOY_X_PIN[NB_JOUEURS] = { A0, A4 };
-constexpr int JOY_Y_PIN[NB_JOUEURS] = { A1, A5 };
-constexpr bool JOY_INVERT_X[NB_JOUEURS] = { false, false };
-constexpr bool JOY_INVERT_Y[NB_JOUEURS] = { false, false };
+constexpr int MAX_JOUEURS = 8;
+constexpr int NB_JOYSTICKS_PHYSIQUES = 2; // Seulement 2 joysticks physiques (J1 et J2)
+int nbJoueursActifs = 8; // Par défaut à 2 joueurs, modifiable via l'appli
+
+// Broches des 2 joysticks physiques uniquement
+constexpr int JOY_X_PIN[NB_JOYSTICKS_PHYSIQUES] = { A0, A4 }; 
+constexpr int JOY_Y_PIN[NB_JOYSTICKS_PHYSIQUES] = { A1, A5 };
+constexpr bool JOY_INVERT_X[NB_JOYSTICKS_PHYSIQUES] = { false, false };
+constexpr bool JOY_INVERT_Y[NB_JOYSTICKS_PHYSIQUES] = { false, false };
 
 constexpr int JOY_RESOLUTION_BITS = 12;
 constexpr int JOY_MAX_VALUE = (1 << JOY_RESOLUTION_BITS) - 1;
@@ -74,6 +74,10 @@ constexpr int MAX_LEN = COLS * ROWS;
 
 constexpr unsigned long START_DELAY = 180;
 constexpr unsigned long MIN_DELAY = 70;
+
+// États du programme
+enum GameState { STATE_MENU, STATE_PLAYING, STATE_GAMEOVER };
+GameState currentState = STATE_MENU;
 
 // ============================================================
 // DONNÉES DU JEU
@@ -101,6 +105,7 @@ struct Player {
 bool same(const Point &a, const Point &b);
 void drawCell(const Point &p, uint16_t color);
 void placeFood();
+void showMenu();
 void showGameOver();
 void newGame();
 void step();
@@ -110,24 +115,25 @@ void setPlayerColor(int idx, uint16_t couleur565);
 void audioTask(void *parameter);
 void bipTask(void *parameter);
 void jouerSon();
+void envoyerScoresVersApp();
 
 // ============================================================
 // VARIABLES DU JEU
 // ============================================================
-Player players[NB_JOUEURS];
+Player players[MAX_JOUEURS];
 Point food;
 unsigned long stepDelay;
 unsigned long lastStep;
 bool gameOver;
-uint16_t playerColor[NB_JOUEURS];
+uint16_t playerColor[MAX_JOUEURS];
 
 constexpr uint16_t PALETTE_COULEURS[] = {
-  ST77XX_GREEN, ST77XX_CYAN, ST77XX_YELLOW, ST77XX_MAGENTA, 0xFC00, ST77XX_BLUE
+  ST77XX_GREEN, ST77XX_CYAN, ST77XX_YELLOW, ST77XX_MAGENTA, 0xFC00, ST77XX_BLUE, 0xF800, 0xFFFF
 };
 constexpr int NB_COULEURS_PALETTE = sizeof(PALETTE_COULEURS) / sizeof(PALETTE_COULEURS[0]);
 
 void assignerCouleursAleatoires() {
-  for (int j = 0; j < NB_JOUEURS; j++) {
+  for (int j = 0; j < MAX_JOUEURS; j++) {
     uint16_t couleur;
     bool dejaPrise;
     do {
@@ -145,7 +151,7 @@ void assignerCouleursAleatoires() {
 }
 
 void setPlayerColor(int idx, uint16_t couleur565) {
-  if (idx < 0 || idx >= NB_JOUEURS) return;
+  if (idx < 0 || idx >= MAX_JOUEURS) return;
   playerColor[idx] = couleur565;
 }
 
@@ -163,7 +169,7 @@ void placeFood() {
     food.x = random(COLS);
     food.y = random(ROWS);
     onSnake = false;
-    for (int j = 0; j < NB_JOUEURS && !onSnake; j++) {
+    for (int j = 0; j < nbJoueursActifs && !onSnake; j++) {
       for (int i = 0; i < players[j].snakeLen; i++) {
         if (same(players[j].snake[i], food)) {
           onSnake = true;
@@ -175,50 +181,89 @@ void placeFood() {
   drawCell(food, ST77XX_RED);
 }
 
+void envoyerScoresVersApp() {
+  if (deviceConnected) {
+    String scoreMessage = "SCORE:SNAKE";
+    for (int j = 0; j < nbJoueursActifs; j++) {
+      scoreMessage += "," + String(players[j].score);
+    }
+    pCharacteristic->setValue(scoreMessage.c_str());
+    pCharacteristic->notify(); 
+    Serial.println("Scores envoyés à l'application via BLE !");
+  }
+}
+
+void showMenu() {
+  tft.fillScreen(ST77XX_BLACK);
+  tft.drawRect(10, 10, 220, 115, ST77XX_WHITE);
+  
+  tft.setTextColor(ST77XX_GREEN);
+  tft.setTextSize(3);
+  tft.setCursor(65, 30);
+  tft.print("SNAKE");
+
+  tft.setTextSize(1);
+  tft.setTextColor(ST77XX_YELLOW);
+  tft.setCursor(35, 75);
+  tft.print("Mode : ");
+  tft.print(nbJoueursActifs);
+  tft.print(" Joueurs (Max 8)");
+
+  tft.setTextColor(ST77XX_WHITE);
+  tft.setCursor(25, 100);
+  tft.print("Joystick (J1/J2) pour lancer");
+}
+
 void showGameOver() {
-  tft.fillRect(20, 20, 200, 95, ST77XX_BLACK);
-  tft.drawRect(20, 20, 200, 95, ST77XX_WHITE);
+  tft.fillRect(10, 10, 220, 115, ST77XX_BLACK);
+  tft.drawRect(10, 10, 220, 115, ST77XX_WHITE);
   tft.setTextColor(ST77XX_RED);
   tft.setTextSize(2);
-  tft.setCursor(38, 28);
+  tft.setCursor(60, 15);
   tft.print("GAME OVER");
+  
   tft.setTextSize(1);
-  tft.setTextColor(playerColor[0]);
-  tft.setCursor(38, 55);
-  tft.print("J1 : ");
-  tft.print(players[0].score);
-  tft.setTextColor(playerColor[1]);
-  tft.setCursor(38, 68);
-  tft.print("J2 : ");
-  tft.print(players[1].score);
+  for (int j = 0; j < nbJoueursActifs; j++) {
+    int xPos = (j < 4) ? 25 : 130;
+    int yPos = 45 + ((j % 4) * 15);
+    tft.setTextColor(playerColor[j]);
+    tft.setCursor(xPos, yPos);
+    tft.print("J"); tft.print(j + 1); tft.print(": ");
+    tft.print(players[j].score);
+  }
+  
   tft.setTextColor(ST77XX_WHITE);
-  tft.setCursor(38, 90);
-  tft.print("Bougez un joystick");
-  tft.setCursor(38, 100);
-  tft.print("pour rejouer");
+  tft.setCursor(55, 110);
+  tft.print("Joystick pour menu");
+
+  envoyerScoresVersApp();
 }
 
 void newGame() {
   tft.fillScreen(ST77XX_BLACK);
   tft.drawRect(0, OFFSET_Y - 1, COLS * CELL, ROWS * CELL + 1, 0x2104);
 
-  players[0].dir = RIGHT;
-  players[0].snakeLen = 3;
-  for (int i = 0; i < players[0].snakeLen; i++) {
-    players[0].snake[i] = { (int8_t)(COLS / 4 - i), (int8_t)(ROWS / 2) };
-  }
-
-  players[1].dir = LEFT;
-  players[1].snakeLen = 3;
-  for (int i = 0; i < players[1].snakeLen; i++) {
-    players[1].snake[i] = { (int8_t)(3 * COLS / 4 + i), (int8_t)(ROWS / 2) };
-  }
-
-  for (int j = 0; j < NB_JOUEURS; j++) {
-    players[j].pendingDirection = players[j].dir;
+  for (int j = 0; j < nbJoueursActifs; j++) {
+    players[j].snakeLen = 3;
     players[j].alive = true;
     players[j].score = 0;
     players[j].joyState = JOY_CENTER;
+
+    int yPos = 1 + (j * (ROWS - 2) / max(1, nbJoueursActifs - 1));
+    
+    if (j % 2 == 0) {
+      players[j].dir = RIGHT;
+      for (int i = 0; i < players[j].snakeLen; i++) {
+        players[j].snake[i] = { (int8_t)(5 - i), (int8_t)yPos };
+      }
+    } else {
+      players[j].dir = LEFT;
+      for (int i = 0; i < players[j].snakeLen; i++) {
+        players[j].snake[i] = { (int8_t)(COLS - 6 + i), (int8_t)yPos };
+      }
+    }
+    players[j].pendingDirection = players[j].dir;
+    
     for (int i = 0; i < players[j].snakeLen; i++) {
       drawCell(players[j].snake[i], playerColor[j]);
     }
@@ -231,11 +276,11 @@ void newGame() {
 }
 
 void step() {
-  Point newHead[NB_JOUEURS];
-  bool eating[NB_JOUEURS] = { false, false };
-  bool died[NB_JOUEURS] = { false, false };
+  Point newHead[8]; // On fixe la taille maximale en dur (MAX_JOUEURS)
+  bool eating[8] = { false };
+  bool died[8] = { false };
 
-  for (int j = 0; j < NB_JOUEURS; j++) {
+  for (int j = 0; j < nbJoueursActifs; j++) {
     if (!players[j].alive) continue;
     if (players[j].pendingDirection != players[j].dir) {
       players[j].dir = players[j].pendingDirection;
@@ -250,7 +295,7 @@ void step() {
     newHead[j] = head;
   }
 
-  for (int j = 0; j < NB_JOUEURS; j++) {
+  for (int j = 0; j < nbJoueursActifs; j++) {
     if (!players[j].alive) continue;
     Point &head = newHead[j];
 
@@ -270,38 +315,38 @@ void step() {
     }
     if (died[j]) continue;
 
-    int autre = 1 - j;
-    if (players[autre].alive) {
-      for (int i = 0; i < players[autre].snakeLen; i++) {
-        if (same(players[autre].snake[i], head)) {
-          died[j] = true;
-          break;
+    for (int autre = 0; autre < nbJoueursActifs; autre++) {
+      if (players[autre].alive) {
+        for (int i = 0; i < players[autre].snakeLen; i++) {
+          if (j == autre && i == 0) continue; 
+          if (same(players[autre].snake[i], head)) {
+            died[j] = true;
+            break;
+          }
         }
       }
     }
   }
 
-  if (NB_JOUEURS == 2 && players[0].alive && players[1].alive && !died[0] && !died[1] && same(newHead[0], newHead[1])) {
-    died[0] = true;
-    died[1] = true;
+  bool unMort = false;
+  for (int j = 0; j < nbJoueursActifs; j++) {
+    if (died[j]) unMort = true;
   }
-
-  if (died[0] || died[1]) {
+  if (unMort) {
     xTaskNotifyGive(audioTaskHandle);
   }
 
-  for (int j = 0; j < NB_JOUEURS; j++) {
+  for (int j = 0; j < nbJoueursActifs; j++) {
     if (died[j] && players[j].alive) {
       for (int i = 0; i < players[j].snakeLen; i++) {
         drawCell(players[j].snake[i], ST77XX_BLACK);
       }
       players[j].alive = false;
       players[j].snakeLen = 0;
-      Serial.printf("Joueur %d elimine - score final : %d\n", j + 1, players[j].score);
     }
   }
 
-  for (int j = 0; j < NB_JOUEURS; j++) {
+  for (int j = 0; j < nbJoueursActifs; j++) {
     if (!players[j].alive) continue;
 
     if (!eating[j]) {
@@ -318,14 +363,13 @@ void step() {
 
     if (eating[j]) {
       players[j].score++;
-      if (stepDelay > MIN_DELAY) stepDelay -= 5;
-      Serial.printf("Joueur %d - score : %d\n", j + 1, players[j].score);
+      if (stepDelay > MIN_DELAY) stepDelay -= 3;
       placeFood();
     }
   }
 
   bool quelquUnVivant = false;
-  for (int j = 0; j < NB_JOUEURS; j++) {
+  for (int j = 0; j < nbJoueursActifs; j++) {
     if (players[j].alive) quelquUnVivant = true;
   }
   if (!quelquUnVivant) gameOver = true;
@@ -355,17 +399,22 @@ void readJoystick(int idx) {
     }
 
     if (directionDemandee) {
-      bool directionOpposee = (p.dir == UP && nouvelleDirection == DOWN) || 
-                              (p.dir == DOWN && nouvelleDirection == UP) || 
-                              (p.dir == LEFT && nouvelleDirection == RIGHT) || 
-                              (p.dir == RIGHT && nouvelleDirection == LEFT);
-      bool memeDirection = (nouvelleDirection == p.dir);
-
-      if (!directionOpposee && !memeDirection) {
-        if (gameOver) newGame();
-        else if (p.alive) p.pendingDirection = nouvelleDirection;
-      } else if (gameOver) {
+      if (currentState == STATE_MENU) {
+        currentState = STATE_PLAYING;
         newGame();
+      } else if (currentState == STATE_GAMEOVER) {
+        currentState = STATE_MENU;
+        showMenu();
+      } else if (currentState == STATE_PLAYING && p.alive) {
+        bool directionOpposee = (p.dir == UP && nouvelleDirection == DOWN) || 
+                                (p.dir == DOWN && nouvelleDirection == UP) || 
+                                (p.dir == LEFT && nouvelleDirection == RIGHT) || 
+                                (p.dir == RIGHT && nouvelleDirection == LEFT);
+        bool memeDirection = (nouvelleDirection == p.dir);
+
+        if (!directionOpposee && !memeDirection) {
+          p.pendingDirection = nouvelleDirection;
+        }
       }
       p.joyState = JOY_USED;
     }
@@ -414,20 +463,46 @@ void bipTask(void *parameter) {
   }
 }
 
-// Gestion de la réception des messages BLE
 class MyCallbacks: public BLECharacteristicCallbacks {
     void onWrite(BLECharacteristic *pChar) {
-      // Remplacement de std::string par String
       String rxValue = pChar->getValue();
 
       if (rxValue.length() > 0) {
-        if (rxValue[0] == 'R') {
-          Serial.println("Commande de redémarrage (R) reçue via BLE !");
-          restartRequested = true;
+        // Choix du nombre de joueurs (ex: "P1" jusqu'à "P8")
+        if (rxValue.startsWith("P") && rxValue.length() <= 3) {
+          int mode = rxValue.substring(1).toInt();
+          if (mode >= 1 && mode <= MAX_JOUEURS) {
+            nbJoueursActifs = mode;
+            Serial.printf("Mode de jeu mis à jour : %d joueurs\n", nbJoueursActifs);
+            if (currentState == STATE_MENU) {
+              showMenu(); 
+            }
+          }
         }
-        if (rxValue[0] == 'C') {
-           Serial.println("Commande de redémarrage (C) reçue via BLE !");
-           setPlayerColor(0, 0x5);
+        // Commande de direction smartphone pour les joueurs 3 à 8 (ex: "3:U", "4:D", etc.)
+        else if (rxValue.indexOf(':') != -1 && currentState == STATE_PLAYING) {
+          int playerIdx = rxValue.substring(0, rxValue.indexOf(':')).toInt() - 1; 
+          char dirChar = rxValue.charAt(rxValue.indexOf(':') + 1);
+
+          if (playerIdx >= NB_JOYSTICKS_PHYSIQUES && playerIdx < nbJoueursActifs && players[playerIdx].alive) {
+            Direction nouvelleDir = players[playerIdx].dir;
+            if (dirChar == 'U') nouvelleDir = UP;
+            else if (dirChar == 'D') nouvelleDir = DOWN;
+            else if (dirChar == 'L') nouvelleDir = LEFT;
+            else if (dirChar == 'R') nouvelleDir = RIGHT;
+
+            bool oppose = (players[playerIdx].dir == UP && nouvelleDir == DOWN) || 
+                          (players[playerIdx].dir == DOWN && nouvelleDir == UP) || 
+                          (players[playerIdx].dir == LEFT && nouvelleDir == RIGHT) || 
+                          (players[playerIdx].dir == RIGHT && nouvelleDir == LEFT);
+            if (!oppose) {
+              players[playerIdx].pendingDirection = nouvelleDir;
+            }
+          }
+        }
+        if (rxValue[0] == 'R') {
+          currentState = STATE_MENU;
+          showMenu();
         }
       }
     }
@@ -436,30 +511,27 @@ class MyCallbacks: public BLECharacteristicCallbacks {
 void setup() {
   Serial.begin(115200);
 
-  // --- INITIALISATION BLE ---
   BLEDevice::init("Snake_ESP32");
   pServer = BLEDevice::createServer();
   pServer->setCallbacks(new MyServerCallbacks());
   
   BLEService *pService = pServer->createService(SERVICE_UUID);
   
-  // Création de la caractéristique en mode écriture (Write)
   pCharacteristic = pService->createCharacteristic(
                       CHARACTERISTIC_UUID,
-                      BLECharacteristic::PROPERTY_WRITE
+                      BLECharacteristic::PROPERTY_WRITE | BLECharacteristic::PROPERTY_NOTIFY
                     );
   pCharacteristic->setCallbacks(new MyCallbacks());
+  pCharacteristic->addDescriptor(new BLE2902());
   
   pService->start();
   
-  // Démarrage de l'annonce BLE
   BLEAdvertising *pAdvertising = BLEDevice::getAdvertising();
   pAdvertising->addServiceUUID(SERVICE_UUID);
   pAdvertising->setScanResponse(true);
   pAdvertising->setMinPreferred(0x06);  
   pAdvertising->setMinPreferred(0x12);
   BLEDevice::startAdvertising();
-  Serial.println("Service BLE démarré. Prêt à être connecté !");
 
   pinMode(TFT_BACKLITE, OUTPUT);
   digitalWrite(TFT_BACKLITE, HIGH);
@@ -470,8 +542,9 @@ void setup() {
   xTaskCreatePinnedToCore(audioTask, "AudioTask", 4096, NULL, 1, &audioTaskHandle, 1);
   xTaskCreatePinnedToCore(bipTask, "BipTask", 2048, NULL, 1, &bipTaskHandle, 1);
 
+  // Calibrage des 2 uniques joysticks physiques
   analogReadResolution(JOY_RESOLUTION_BITS);
-  for (int j = 0; j < NB_JOUEURS; j++) {
+  for (int j = 0; j < NB_JOYSTICKS_PHYSIQUES; j++) {
     long sommeX = 0;
     long sommeY = 0;
     constexpr int NB_ECHANTILLONS = 20;
@@ -493,26 +566,31 @@ void setup() {
   randomSeed(micros());
   assignerCouleursAleatoires();
   jouerSon();
-  newGame();
+  
+  showMenu();
 }
 
 void loop() {
-  // --- GESTION DU REDÉMARRAGE BLE ---
   if (restartRequested) {
-    restartRequested = false; // On réinitialise le drapeau
-    newGame();
+    restartRequested = false; 
+    currentState = STATE_MENU;
+    showMenu();
   }
 
-  for (int j = 0; j < NB_JOUEURS; j++) {
+  // Lecture des joysticks physiques uniquement pour les joueurs 1 et 2
+  for (int j = 0; j < min(nbJoueursActifs, NB_JOYSTICKS_PHYSIQUES); j++) {
     readJoystick(j);
   }
 
-  if (!gameOver && millis() - lastStep >= stepDelay) {
-    lastStep = millis();
-    step();
-    if (gameOver) {
-      jouerSon();
-      showGameOver();
+  if (currentState == STATE_PLAYING) {
+    if (!gameOver && millis() - lastStep >= stepDelay) {
+      lastStep = millis();
+      step();
+      if (gameOver) {
+        jouerSon();
+        showGameOver();
+        currentState = STATE_GAMEOVER;
+      }
     }
   }
 }
